@@ -36,6 +36,11 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.5,
 )
 
+# Server-side pose choices for control websocket
+POSES = ["Arms Down", "Y-Pose", "T-Pose", "OMG"]
+
+CONTROL_WS_CONNECTIONS = set()
+
 
 def _decode_image_bytes(image_bytes: bytes) -> np.ndarray:
     """Decode image bytes (JPEG/PNG) into an OpenCV BGR image."""
@@ -177,6 +182,66 @@ async def websocket_test(ws: WebSocket):
     finally:
         try:
             TEST_WS_CONNECTIONS.remove(ws)
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/control")
+async def websocket_control(ws: WebSocket):
+    """Control websocket: clients can request the server to pick the next pose.
+
+    Protocol:
+    - Client sends JSON: {"type": "next"} when its round ends and it wants a server-chosen pose.
+    - Server responds to that client with: {"type": "pose", "pose": "T-Pose"}
+    - Other messages are ignored. This keeps the server as the authority for random selection
+      while allowing each client to receive its own random pose.
+    """
+    await ws.accept()
+    CONTROL_WS_CONNECTIONS.add(ws)
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+
+            # support text frames containing JSON
+            text = msg.get("text")
+            if not text:
+                # ignore binary messages
+                continue
+            try:
+                import json
+
+                obj = json.loads(text)
+            except Exception:
+                await ws.send_json({"error": "invalid_json"})
+                continue
+
+            if obj.get("type") == "next":
+                # pick a random pose and broadcast it to all connected control clients
+                import random
+
+                pose = random.choice(POSES)
+                dead = []
+                for c in list(CONTROL_WS_CONNECTIONS):
+                    try:
+                        await c.send_json({"type": "pose", "pose": pose})
+                    except Exception:
+                        dead.append(c)
+                for d in dead:
+                    try:
+                        CONTROL_WS_CONNECTIONS.remove(d)
+                    except Exception:
+                        pass
+            else:
+                # echo unknown message types for diagnostics
+                await ws.send_json({"type": "error", "detail": "unknown_type"})
+    except Exception:
+        # connection dropped or error
+        pass
+    finally:
+        try:
+            CONTROL_WS_CONNECTIONS.remove(ws)
         except Exception:
             pass
 
