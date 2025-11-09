@@ -38,6 +38,33 @@ export default function PlayPage() {
   const gameOverRef = React.useRef<boolean>(false);
   const uidRef = React.useRef<string | null>(null);
   const controlWsRef = React.useRef<WebSocket | null>(null);
+
+  const pickDifferentIndex = React.useCallback(
+    (prev: number, desired?: number) => {
+      if (POSES.length <= 1) return prev;
+      if (
+        typeof desired === "number" &&
+        desired >= 0 &&
+        desired < POSES.length &&
+        desired !== prev
+      ) {
+        return desired;
+      }
+      const candidates: number[] = [];
+      for (let i = 0; i < POSES.length; i++) {
+        if (i !== prev) candidates.push(i);
+      }
+      return candidates[Math.floor(Math.random() * candidates.length)] ?? prev;
+    },
+    [POSES.length]
+  );
+
+  const setPoseIdxDifferent = React.useCallback(
+    (desired?: number) => {
+      setCurrentPoseIdx((prev) => pickDifferentIndex(prev, desired));
+    },
+    [pickDifferentIndex]
+  );
   // guard to prevent double-awarding points within a short window
   const awardLockRef = React.useRef(false);
   // guard to prevent double-decrementing lives within a short window
@@ -58,21 +85,11 @@ export default function PlayPage() {
     if (!poseNeedsUpdate) return;
     // only update when not gameOver
     if (!gameOverRef.current) {
-      setCurrentPoseIdx((prev) => {
-        if (POSES.length <= 1) return prev;
-        let pick = prev;
-        let attempts = 0;
-        while (pick === prev && attempts < 8) {
-          pick = Math.floor(Math.random() * POSES.length);
-          attempts++;
-        }
-        if (pick === prev) pick = (prev + 1) % POSES.length;
-        return pick;
-      });
+      setPoseIdxDifferent();
     }
     // reset flag
     setPoseNeedsUpdate(false);
-  }, [poseNeedsUpdate]);
+  }, [poseNeedsUpdate, setPoseIdxDifferent]);
 
   useEffect(() => {
     // get authenticated uid and load player profile from Firestore
@@ -195,9 +212,8 @@ export default function PlayPage() {
         try {
           const d = JSON.parse(ev.data as string);
           if (d?.type === "pose" && typeof d.pose === "string") {
-            // map pose name to index in POSES
             const idx = POSES.indexOf(d.pose);
-            if (idx >= 0) setCurrentPoseIdx(idx);
+            if (idx >= 0) setPoseIdxDifferent(idx);
           }
         } catch (e) {
           console.error("control ws message parse error", e);
@@ -311,10 +327,10 @@ export default function PlayPage() {
   setIntervalSec(10);
   intervalSecRef.current = 10;
     // pick a random starting pose
-    setCurrentPoseIdx(() => {
-      if (POSES.length <= 1) return 0;
-      return Math.floor(Math.random() * POSES.length);
-    });
+    if (POSES.length > 0) {
+      const randomIdx = Math.floor(Math.random() * POSES.length);
+      setPoseIdxDifferent(randomIdx);
+    }
     // align displayed timer with the intervalSec we just set above
     setTimeLeft(intervalSecRef.current);
     setCurrentProgress(0);
