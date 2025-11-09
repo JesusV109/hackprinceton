@@ -1,6 +1,11 @@
 fastapi==0.95.2
 uvicorn[standard]==0.22.0
+
+# CPU-only Mediapipe build (lighter)
 mediapipe==0.10.11
+
+# Use CPU OpenCV
 opencv-python-headless==4.8.0.76
+
 numpy
 python-dotenv
