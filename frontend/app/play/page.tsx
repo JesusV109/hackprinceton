@@ -1,6 +1,19 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import { db, onAuthReady } from "@/lib/firebase";
+import {
+  doc,
+  runTransaction,
+  serverTimestamp,
+  collection,
+  query,
+  orderBy,
+  limit,
+  onSnapshot,
+  getDoc,
+ 
+} from "firebase/firestore";
 
 export default function PlayPage() {
   const [name, setName] = useState("");
@@ -8,10 +21,14 @@ export default function PlayPage() {
   // pose cycle state: start at 15s, decrease down to 5s over time
   const POSES = ["T-Pose", "L-Pose", "Y-Pose", "Arms Down", "Star Pose", "Victory" /* extendable list */];
   const [currentPoseIdx, setCurrentPoseIdx] = useState(() => Math.floor(Math.random() * POSES.length));
+  // boolean flag that indicates the round ended and we should update to a new pose
+  const [poseNeedsUpdate, setPoseNeedsUpdate] = useState(false);
+  const poseNeedsUpdateRef = React.useRef<boolean>(false);
   const [intervalSec, setIntervalSec] = useState(10);
   const [timeLeft, setTimeLeft] = useState(intervalSec);
   const MIN_INTERVAL = 3; // minimum seconds per round (will not shrink below this)
   const intervalSecRef = React.useRef<number>(intervalSec);
+  const maxIntervalRef = React.useRef<number>(intervalSec);
   const [currentProgress, setCurrentProgress] = useState(0); // progress from child 0..1
   const currentProgressRef = React.useRef<number>(0);
   const [playerScore, setPlayerScore] = useState(0);
@@ -19,6 +36,7 @@ export default function PlayPage() {
   const [lives, setLives] = useState(3); // number of lives to display
   const [gameOver, setGameOver] = useState(false);
   const gameOverRef = React.useRef<boolean>(false);
+  const uidRef = React.useRef<string | null>(null);
   // guard to prevent double-awarding points within a short window
   const awardLockRef = React.useRef(false);
   // guard to prevent double-decrementing lives within a short window
@@ -29,9 +47,50 @@ export default function PlayPage() {
     gameOverRef.current = gameOver;
   }, [gameOver]);
 
+  // keep poseNeedsUpdateRef in sync with state for closures
   useEffect(() => {
-    const stored = localStorage.getItem("playerName");
-    if (stored) setName(stored);
+    poseNeedsUpdateRef.current = poseNeedsUpdate;
+  }, [poseNeedsUpdate]);
+
+  // when poseNeedsUpdate is set (end of round), perform the actual pose transition here
+  useEffect(() => {
+    if (!poseNeedsUpdate) return;
+    // only update when not gameOver
+    if (!gameOverRef.current) {
+      setCurrentPoseIdx((prev) => {
+        if (POSES.length <= 1) return prev;
+        let pick = prev;
+        let attempts = 0;
+        while (pick === prev && attempts < 8) {
+          pick = Math.floor(Math.random() * POSES.length);
+          attempts++;
+        }
+        if (pick === prev) pick = (prev + 1) % POSES.length;
+        return pick;
+      });
+    }
+    // reset flag
+    setPoseNeedsUpdate(false);
+  }, [poseNeedsUpdate]);
+
+  useEffect(() => {
+    // get authenticated uid and load player profile from Firestore
+    onAuthReady(async (uid) => {
+      try {
+        // store uid locally for use in transactions
+        uidRef.current = uid;
+        // fetch player profile
+        const ref = doc(db, "players", uid);
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          if (data.name) setName(data.name);
+          if (typeof data.completedCount === "number") setPlayerScore(data.completedCount);
+        }
+      } catch (e) {
+        console.error("failed to load player profile", e);
+      }
+    });
   }, []);
 
   // countdown timer that triggers pose changes and speeds up over time.
@@ -39,6 +98,10 @@ export default function PlayPage() {
   // interval length without needing to recreate the interval on every change.
   useEffect(() => {
     intervalSecRef.current = intervalSec;
+    // keep the maxIntervalRef in sync so round resets consistently use the latest interval
+    maxIntervalRef.current = intervalSec;
+    // also ensure visible timer aligns when interval is changed externally
+    setTimeLeft(intervalSec);
   }, [intervalSec]);
 
   useEffect(() => {
@@ -91,21 +154,9 @@ export default function PlayPage() {
 
           // advance pose only if not gameOver
           if (!gameOverRef.current) {
-            // pick a new random pose index (avoid repeating the same pose twice)
-            setCurrentPoseIdx((prev) => {
-              if (POSES.length <= 1) return prev;
-              let pick = prev;
-              let attempts = 0;
-              while (pick === prev && attempts < 8) {
-                pick = Math.floor(Math.random() * POSES.length);
-                attempts++;
-              }
-              // as a fallback, if it somehow still equals prev, advance by 1
-              if (pick === prev) pick = (prev + 1) % POSES.length;
-              return pick;
-            });
-            // reset timeLeft to the current interval for the next round
-            return intervalSecRef.current;
+            // mark that pose should be updated; a separate effect will perform the update
+            setPoseNeedsUpdate(true);
+            return maxIntervalRef.current;
           }
 
           return 0;
@@ -127,14 +178,20 @@ export default function PlayPage() {
   // load initial score from local leaderboard
   useEffect(() => {
     const p = localStorage.getItem("playerName") || "Player";
-    const lbRaw = localStorage.getItem("leaderboard") || "[]";
-    try {
-      const lb = JSON.parse(lbRaw);
-      const me = lb.find((x: any) => x.name === p);
-      if (me) setPlayerScore(me.score || 0);
-    } catch (e) {
-      // ignore
-    }
+    // read player's current completedCount from Firestore if available
+    (async () => {
+      try {
+        const id = encodeURIComponent(p);
+        const ref = doc(db, "leaderboard", id);
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          setPlayerScore((data.completedCount as number) || 0);
+        }
+      } catch (e) {
+        // ignore
+      }
+    })();
   }, []);
 
   const awardPointToPlayer = () => {
@@ -145,26 +202,45 @@ export default function PlayPage() {
     window.setTimeout(() => {
       awardLockRef.current = false;
     }, 1200);
-    const name = localStorage.getItem("playerName") || "Player";
-    const raw = localStorage.getItem("leaderboard") || "[]";
-    let lb = [] as any[];
-    try {
-      lb = JSON.parse(raw);
-    } catch (e) {
-      lb = [];
+    const uid = uidRef.current;
+    if (!uid) {
+      console.warn("no auth uid available; cannot write score to Firestore");
     }
-    const entry = lb.find((x: any) => x.name === name);
-    if (entry) {
-      entry.score = (entry.score || 0) + 1;
-    } else {
-      lb.push({ name, score: 1 });
-    }
-    // sort descending
-    lb.sort((a: any, b: any) => (b.score || 0) - (a.score || 0));
-    localStorage.setItem("leaderboard", JSON.stringify(lb));
-    // update local player score state
-    const me = lb.find((x: any) => x.name === name);
-    setPlayerScore(me ? me.score : 0);
+    const id = uid || encodeURIComponent(localStorage.getItem("playerName") || "Player");
+    const ref = doc(db, "players", id);
+    // Use a transaction to safely increment completedCount and set metadata
+    runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) {
+        tx.set(ref, {
+          name: name || "Player",
+          completedCount: 1,
+          totalAttempts: 1,
+          accuracy: 1,
+          lastPose: currentPoseName,
+          lastUpdated: serverTimestamp(),
+        });
+        return 1;
+      }
+      const data = snap.data() as any;
+      const nextCompleted = (data.completedCount || 0) + 1;
+      const nextAttempts = (data.totalAttempts || 0) + 1;
+      const nextAccuracy = nextCompleted / nextAttempts;
+      tx.update(ref, {
+        completedCount: nextCompleted,
+        totalAttempts: nextAttempts,
+        accuracy: nextAccuracy,
+        lastPose: currentPoseName,
+        lastUpdated: serverTimestamp(),
+      });
+      return nextCompleted;
+    })
+      .then((newCount) => {
+        setPlayerScore(newCount as number);
+      })
+      .catch((e) => {
+        console.error("awardPoint transaction failed", e);
+      });
     // trigger pulse in child
     setConfirmedPulseIdx((n) => n + 1);
     // shorten the interval (make rounds faster) on each successful score
@@ -191,7 +267,8 @@ export default function PlayPage() {
       if (POSES.length <= 1) return 0;
       return Math.floor(Math.random() * POSES.length);
     });
-    setTimeLeft(15);
+    // align displayed timer with the intervalSec we just set above
+    setTimeLeft(intervalSecRef.current);
     setCurrentProgress(0);
     // nudge a pulse so child clears any success pulse UI
     setConfirmedPulseIdx((n) => n + 1);
@@ -262,41 +339,32 @@ export default function PlayPage() {
 
 
 function Leaderboard() {
-  const [entries, setEntries] = React.useState<Array<{ name: string; score: number }>>([]);
+  const [entries, setEntries] = React.useState<Array<any>>([]);
 
   useEffect(() => {
-    const raw = localStorage.getItem("leaderboard") || "[]";
-    try {
-      const lb = JSON.parse(raw) as Array<{ name: string; score: number }>;
-      lb.sort((a, b) => (b.score || 0) - (a.score || 0));
-      // limit displayed entries so the leaderboard UI doesn't grow indefinitely
-      setEntries(lb.slice(0, 20));
-    } catch (e) {
-      setEntries([]);
-    }
-    // poll occasionally to pick up changes from other tabs
-    const t = setInterval(() => {
-      const raw2 = localStorage.getItem("leaderboard") || "[]";
-      try {
-        const lb2 = JSON.parse(raw2) as Array<{ name: string; score: number }>;
-        lb2.sort((a, b) => (b.score || 0) - (a.score || 0));
-        setEntries(lb2.slice(0, 20));
-      } catch {}
-    }, 2000);
-    return () => clearInterval(t);
+    // subscribe to top 20 players by completedCount
+  const q = query(collection(db, "players"), orderBy("completedCount", "desc"), limit(20));
+    const unsub = onSnapshot(q, (snap) => {
+      setEntries(
+        snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))
+      );
+    }, (err) => {
+      console.error("leaderboard snapshot error", err);
+    });
+    return () => unsub();
   }, []);
 
   return (
     <div className="w-full bg-black/50 p-3 rounded max-h-[560px] overflow-auto">
-  <h3 className="text-sm font-semibold mb-1">Leaderboard</h3>
+      <h3 className="text-sm font-semibold mb-1">Leaderboard</h3>
       {entries.length === 0 ? (
         <div className="text-sm text-gray-400">No scores yet</div>
       ) : (
         <ol className="list-decimal list-inside space-y-1 text-sm">
           {entries.map((e, i) => (
-            <li key={i} className="flex justify-between">
+            <li key={e.id || i} className="flex justify-between">
               <span className="truncate pr-2">{e.name}</span>
-              <span className="font-mono">{e.score}</span>
+              <span className="font-mono">{e.completedCount ?? 0}</span>
             </li>
           ))}
         </ol>
@@ -886,35 +954,8 @@ function WebcamPosePanel({ targetPose, onProgressChange, confirmedPulseIdx }: { 
   const xThresh = shoulderWidth * 0.4;
   const condWristX = lwr.x < torsoCenterX - xThresh && rwr.x > torsoCenterX + xThresh;
 
-  // finger-level requirement: if finger landmarks exist, ensure they are near wrist y
-  const fingerNames = ["index", "middle", "ring", "pinky", "thumb", "tip"];
-  const findFingerYs = (side: string) => {
-    try {
-      return landmarks
-        .filter((p: any) => p?.name && p.name.toLowerCase().includes(side) && fingerNames.some((f) => p.name.toLowerCase().includes(f)))
-        .map((p: any) => (typeof p.y === "number" ? p.y : 0));
-    } catch (e) {
-      return [] as number[];
-    }
-  };
-  const leftFingerYs = findFingerYs("left");
-  const rightFingerYs = findFingerYs("right");
-  let condFingerLevel = true;
-  if (leftFingerYs.length || rightFingerYs.length) {
-    const toPixels = (y: number) => (y <= 1 ? y * dispHeightEstimate() : y);
-    const leftAvg = leftFingerYs.length ? leftFingerYs.map((yy: number) => toPixels(yy)).reduce((a: number, b: number) => a + b, 0) / leftFingerYs.length : null;
-    const rightAvg = rightFingerYs.length ? rightFingerYs.map((yy: number) => toPixels(yy)).reduce((a: number, b: number) => a + b, 0) / rightFingerYs.length : null;
-    const lwrY = toPixels(lwr.y || 0);
-    const rwrY = toPixels(rwr.y || 0);
-    const fingerThresh = dispHeightEstimate() * 0.06;
-    const dLeft = leftAvg !== null ? Math.abs(leftAvg - lwrY) : 0;
-    const dRight = rightAvg !== null ? Math.abs(rightAvg - rwrY) : 0;
-    const avgDiff = (dLeft + dRight) / ((leftAvg !== null ? 1 : 0) + (rightAvg !== null ? 1 : 0) || 1);
-    const handsDiff = (leftAvg !== null && rightAvg !== null) ? Math.abs(leftAvg - rightAvg) : 0;
-    condFingerLevel = avgDiff < fingerThresh && handsDiff < (fingerThresh * 1.2);
-  }
-
-  return condElbows && condWrists && condWristX && condWristLevel && condFingerLevel;
+  // drop finger-level checks: treat T-Pose detection as based on shoulders/elbows/wrists only
+  return condElbows && condWrists && condWristX && condWristLevel;
     }
     // L-Pose: one arm down alongside the body, the other arm extended horizontally
     if (targetPose === "L-Pose") {

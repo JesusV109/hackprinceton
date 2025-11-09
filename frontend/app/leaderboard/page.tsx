@@ -5,11 +5,11 @@ import { collection, query, orderBy, onSnapshot } from "firebase/firestore";
 import { useEffect, useState } from "react";
 
 export default function LeaderboardPage() {
-  const [players, setPlayers] = useState([]);
+  const [players, setPlayers] = useState<any[]>([]);
 
   useEffect(() => {
     const q = query(
-      collection(db, "leaderboard"),
+      collection(db, "players"),
       orderBy("completedCount", "desc"),
       orderBy("accuracy", "desc")
     );

@@ -6,7 +6,10 @@ import {
   signInAnonymously,
   onAuthStateChanged,
 } from "firebase/auth";
+import { signOut } from "firebase/auth";
 
+// Load Firebase configuration from NEXT_PUBLIC_* environment variables.
+// These variables must be set in your environment (e.g. frontend/.env) for the client to initialize Firebase.
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
   authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
@@ -30,5 +33,24 @@ if (typeof window !== "undefined") {
 export function onAuthReady(callback: (uid: string) => void) {
   onAuthStateChanged(auth, (user) => {
     if (user) callback(user.uid);
+  });
+}
+
+// Create a fresh anonymous auth session. This signs out the current user (if any)
+// and signs in anonymously again, resolving with the new UID once available.
+export async function createNewAnonymousSession(): Promise<string> {
+  try {
+    await signOut(auth).catch(() => {});
+  } catch (e) {
+    // ignore
+  }
+  await signInAnonymously(auth);
+  return new Promise((resolve) => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        resolve(user.uid);
+        unsub();
+      }
+    });
   });
 }

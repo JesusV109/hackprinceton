@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { db, createNewAnonymousSession } from "@/lib/firebase";
+import { doc, setDoc, serverTimestamp } from "firebase/firestore";
 import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -9,12 +11,18 @@ export default function RegisterPage() {
   const [name, setName] = useState("");
   const router = useRouter();
 
-  function saveName() {
+  async function saveName() {
     if (!name.trim()) return;
     const trimmed = name.trim();
-    localStorage.setItem("playerName", trimmed);
-    // visual confirmation in case of issues with navigation
-    // navigate to play
+    // create a fresh anonymous session (new UID) so each registration becomes a new player
+    try {
+      const uid = await createNewAnonymousSession();
+      const ref = doc(db, "players", uid);
+      await setDoc(ref, { name: trimmed, lastUpdated: serverTimestamp() }, { merge: true });
+    } catch (e) {
+      console.error("failed to create anonymous session or save name", e);
+    }
+    // navigate to play regardless
     router.push("/play");
   }
 
@@ -28,8 +36,12 @@ export default function RegisterPage() {
           value={name}
           onChange={(e) => setName(e.target.value)}
           onBlur={() => {
-            // save on blur as a fallback
-            if (name.trim()) localStorage.setItem("playerName", name.trim());
+            // save on blur as a best-effort fallback: create a new anonymous session and store name
+            if (name.trim()) {
+              createNewAnonymousSession()
+                .then((uid) => setDoc(doc(db, "players", uid), { name: name.trim(), lastUpdated: serverTimestamp() }, { merge: true }))
+                .catch(console.error);
+            }
           }}
           className="text-black"
         />
