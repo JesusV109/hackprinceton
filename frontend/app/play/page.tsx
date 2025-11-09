@@ -24,7 +24,7 @@ export default function PlayPage() {
   // boolean flag that indicates the round ended and we should update to a new pose
   const [poseNeedsUpdate, setPoseNeedsUpdate] = useState(false);
   const poseNeedsUpdateRef = React.useRef<boolean>(false);
-  const [intervalSec, setIntervalSec] = useState(10);
+  const [intervalSec, setIntervalSec] = useState(6);
   const [timeLeft, setTimeLeft] = useState(intervalSec);
   const MIN_INTERVAL = 3; // minimum seconds per round (will not shrink below this)
   const intervalSecRef = React.useRef<number>(intervalSec);
